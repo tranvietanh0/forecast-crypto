@@ -1,0 +1,16 @@
+{
+  "coin_universe": ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
+  "forecast_horizons": ["4h", "24h"],
+  "providers": {
+    "market": {
+      "name": "binance",
+      "base_url": "https://api.binance.com",
+      "candles_path": "/api/v3/klines"
+    }
+  },
+  "scheduler": {
+    "forecast_cron": "0 */4 * * *",
+    "telegram_cron": "15 */4 * * *"
+  },
+  "retention_days": 90
+}

@@ -1,0 +1,11 @@
+DROP INDEX IF EXISTS idx_event_log_status_created_at;
+DROP TABLE IF EXISTS event_log;
+DROP TABLE IF EXISTS realized_outcomes;
+DROP TABLE IF EXISTS notification_runs;
+DROP INDEX IF EXISTS idx_forecasts_batch_symbol;
+DROP TABLE IF EXISTS forecasts;
+DROP TABLE IF EXISTS forecast_batches;
+DROP TABLE IF EXISTS model_versions;
+DROP TABLE IF EXISTS dataset_versions;
+DROP INDEX IF EXISTS idx_raw_market_events_symbol_close_time;
+DROP TABLE IF EXISTS raw_market_events;
