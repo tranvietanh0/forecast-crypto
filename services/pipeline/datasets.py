@@ -154,3 +154,9 @@ def write_dataset_artifact(dataset_bundle: DatasetBundle) -> None:
             "source_end_time": source_end_time,
         },
     )
+
+
+
+def load_dataset_artifact(dataset_version: str) -> dict:
+    artifact_path = ARTIFACTS_DIR / f"{dataset_version}.json"
+    return json.loads(artifact_path.read_text(encoding="utf-8"))

@@ -128,7 +128,7 @@ class PipelineTests(unittest.TestCase):
             timeframe_to_timedelta("0h")
 
     def _build_market_events(self, symbol: str, base_price: float, trending: bool) -> list[MarketEvent]:
-        base_time = datetime(2026, 5, 1, 0, 0, tzinfo=timezone.utc)
+        base_time = datetime(2099, 5, 1, 0, 0, tzinfo=timezone.utc)
         prices = []
         for index in range(32):
             if trending:
@@ -165,7 +165,7 @@ class PipelineTests(unittest.TestCase):
         return events
 
     def _build_short_history(self, symbol: str, base_price: float) -> list[MarketEvent]:
-        base_time = datetime(2026, 5, 1, 0, 0, tzinfo=timezone.utc)
+        base_time = datetime(2099, 5, 1, 0, 0, tzinfo=timezone.utc)
         events: list[MarketEvent] = []
         for index in range(3):
             open_time = base_time + timedelta(hours=index)

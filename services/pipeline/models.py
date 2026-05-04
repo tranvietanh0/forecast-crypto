@@ -124,6 +124,62 @@ def fit_price_regressor(
 
 
 
+def serialize_trend_model(model: TrendModel) -> dict:
+    return {
+        "logic_version": TREND_MODEL_LOGIC_VERSION,
+        "standardization": {
+            "means": model.standardization.means,
+            "scales": model.standardization.scales,
+        },
+        "positive_centroid": model.positive_centroid,
+        "negative_centroid": model.negative_centroid,
+        "single_label": model.single_label,
+    }
+
+
+
+def deserialize_trend_model(payload: dict) -> TrendModel:
+    standardization = Standardization(
+        means={key: float(value) for key, value in payload["standardization"]["means"].items()},
+        scales={key: float(value) for key, value in payload["standardization"]["scales"].items()},
+    )
+    positive_centroid = payload.get("positive_centroid")
+    negative_centroid = payload.get("negative_centroid")
+    return TrendModel(
+        standardization=standardization,
+        positive_centroid={key: float(value) for key, value in positive_centroid.items()} if positive_centroid else None,
+        negative_centroid={key: float(value) for key, value in negative_centroid.items()} if negative_centroid else None,
+        single_label=payload.get("single_label"),
+    )
+
+
+
+def serialize_price_regressor(model: PriceRegressor) -> dict:
+    return {
+        "logic_version": PRICE_MODEL_LOGIC_VERSION,
+        "standardization": {
+            "means": model.standardization.means,
+            "scales": model.standardization.scales,
+        },
+        "weights": model.weights,
+        "bias": model.bias,
+    }
+
+
+
+def deserialize_price_regressor(payload: dict) -> PriceRegressor:
+    standardization = Standardization(
+        means={key: float(value) for key, value in payload["standardization"]["means"].items()},
+        scales={key: float(value) for key, value in payload["standardization"]["scales"].items()},
+    )
+    return PriceRegressor(
+        standardization=standardization,
+        weights={key: float(value) for key, value in payload["weights"].items()},
+        bias=float(payload["bias"]),
+    )
+
+
+
 def _fit_standardization(rows: list[FeatureRow]) -> Standardization:
     means: dict[str, float] = {}
     scales: dict[str, float] = {}

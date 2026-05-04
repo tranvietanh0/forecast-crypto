@@ -166,11 +166,13 @@ class ModelRegistered(EventContract):
 class ForecastGenerated(EventContract):
     forecast_batch_id: str
     model_version: str
+    aux_model_version: str | None
     symbol: str
     timeframe: str
     horizon: str
     forecast_time: datetime
     target_time: datetime
+    valid_until: datetime
     trend: ForecastDirection
     target_price: float
     confidence: float
@@ -179,6 +181,8 @@ class ForecastGenerated(EventContract):
     def __post_init__(self) -> None:
         if self.target_time <= self.forecast_time:
             raise ContractValidationError("target_time must be greater than forecast_time")
+        if self.valid_until < self.target_time:
+            raise ContractValidationError("valid_until must be greater than or equal to target_time")
         if not 0 <= self.confidence <= 1:
             raise ContractValidationError("confidence must be between 0 and 1")
 
@@ -189,11 +193,13 @@ class ForecastGenerated(EventContract):
             event_id=payload["event_id"],
             forecast_batch_id=payload["forecast_batch_id"],
             model_version=payload["model_version"],
+            aux_model_version=payload.get("aux_model_version"),
             symbol=payload["symbol"],
             timeframe=payload["timeframe"],
             horizon=payload["horizon"],
             forecast_time=parse_datetime(payload["forecast_time"]),
             target_time=parse_datetime(payload["target_time"]),
+            valid_until=parse_datetime(payload.get("valid_until", payload["target_time"])),
             trend=ForecastDirection(payload["trend"]),
             target_price=float(payload["target_price"]),
             confidence=float(payload["confidence"]),

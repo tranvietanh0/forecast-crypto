@@ -19,14 +19,17 @@ class ModelRegistration:
     model_version: str
     model_family: str
     dataset_version: str
+    timeframe: str
     horizons: list[str]
     symbols: list[str]
     metrics: dict[str, float]
+    training_run_id: str
     training_window_start: str
     training_window_end: str
     feature_schema_version: str
     logic_version: str
     hyperparameters: dict[str, float | int | str]
+    model_payload: dict
     registered_at: str
 
 
@@ -34,25 +37,30 @@ class ModelRegistration:
 def build_model_registration(
     model_family: str,
     dataset_version: str,
+    timeframe: str,
     horizon: str,
     symbols: list[str],
     metrics: dict[str, float],
+    training_run_id: str,
     training_window_start: str,
     training_window_end: str,
     feature_schema_version: str,
     logic_version: str,
     hyperparameters: dict[str, float | int | str],
+    model_payload: dict,
 ) -> ModelRegistration:
     digest = sha256(
         json.dumps(
             {
                 "model_family": model_family,
                 "dataset_version": dataset_version,
+                "timeframe": timeframe,
                 "horizon": horizon,
                 "symbols": symbols,
                 "feature_schema_version": feature_schema_version,
                 "logic_version": logic_version,
                 "hyperparameters": hyperparameters,
+                "model_payload": model_payload,
             },
             sort_keys=True,
         ).encode("utf-8")
@@ -61,14 +69,17 @@ def build_model_registration(
         model_version=f"{model_family}-{digest}",
         model_family=model_family,
         dataset_version=dataset_version,
+        timeframe=timeframe,
         horizons=[horizon],
         symbols=symbols,
         metrics=metrics,
+        training_run_id=training_run_id,
         training_window_start=training_window_start,
         training_window_end=training_window_end,
         feature_schema_version=feature_schema_version,
         logic_version=logic_version,
         hyperparameters=hyperparameters,
+        model_payload=model_payload,
         registered_at=datetime.now(timezone.utc).isoformat(),
     )
 
@@ -96,12 +107,15 @@ def register_model(connection: sqlite3.Connection, registration: ModelRegistrati
             json.dumps(
                 {
                     **registration.metrics,
+                    "timeframe": registration.timeframe,
+                    "training_run_id": registration.training_run_id,
                     "training_window_start": registration.training_window_start,
                     "training_window_end": registration.training_window_end,
                     "feature_schema_version": registration.feature_schema_version,
                     "feature_names": FEATURE_NAMES,
                     "logic_version": registration.logic_version,
                     "hyperparameters": registration.hyperparameters,
+                    "model_payload": registration.model_payload,
                 },
                 sort_keys=True,
             ),
@@ -120,14 +134,23 @@ def write_model_artifact(registration: ModelRegistration) -> None:
             "model_version": registration.model_version,
             "model_family": registration.model_family,
             "dataset_version": registration.dataset_version,
+            "timeframe": registration.timeframe,
             "horizons": registration.horizons,
             "symbols": registration.symbols,
             "metrics": registration.metrics,
+            "training_run_id": registration.training_run_id,
             "training_window_start": registration.training_window_start,
             "training_window_end": registration.training_window_end,
             "feature_schema_version": registration.feature_schema_version,
             "feature_names": FEATURE_NAMES,
             "logic_version": registration.logic_version,
             "hyperparameters": registration.hyperparameters,
+            "model_payload": registration.model_payload,
         },
     )
+
+
+
+def load_model_artifact(model_version: str) -> dict:
+    artifact_path = ARTIFACTS_DIR / f"{model_version}.json"
+    return json.loads(artifact_path.read_text(encoding="utf-8"))
