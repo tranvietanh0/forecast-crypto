@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from math import sqrt
 
 from contracts.events import MarketEvent
+from contracts.timeframe import timeframe_to_timedelta
 
 
 FEATURE_SCHEMA_VERSION = "1.0"
@@ -59,6 +60,45 @@ def build_feature_row(
     horizon: str,
 ) -> FeatureRow:
     current_event = events[current_index]
+    target_event = events[current_index + horizon_steps]
+    return _build_feature_row(
+        events,
+        current_index,
+        horizon,
+        target_event.close_time.isoformat(),
+        target_event.close_price,
+        _safe_return(target_event.close_price, current_event.close_price),
+        1 if target_event.close_price > current_event.close_price else 0,
+    )
+
+
+
+def build_live_feature_row(events: list[MarketEvent], horizon: str) -> FeatureRow:
+    current_index = len(events) - 1
+    current_event = events[current_index]
+    target_time = current_event.close_time + timeframe_to_timedelta(horizon)
+    return _build_feature_row(
+        events,
+        current_index,
+        horizon,
+        target_time.isoformat(),
+        current_event.close_price,
+        0.0,
+        0,
+    )
+
+
+
+def _build_feature_row(
+    events: list[MarketEvent],
+    current_index: int,
+    horizon: str,
+    target_time: str,
+    target_price: float,
+    future_return: float,
+    trend_label: int,
+) -> FeatureRow:
+    current_event = events[current_index]
     current_price = current_event.close_price
     previous_prices = _close_prices(events[max(0, current_index - 6): current_index + 1])
     return_1 = _safe_return(current_price, events[current_index - 1].close_price)
@@ -72,10 +112,6 @@ def build_feature_row(
     rolling_mean_return_3 = sum(rolling_window) / len(rolling_window) if rolling_window else 0.0
     rolling_volatility_3 = _standard_deviation(rolling_window)
     regime_strength_6 = _safe_return(current_price, previous_prices[0])
-
-    target_event = events[current_index + horizon_steps]
-    future_return = _safe_return(target_event.close_price, current_price)
-    trend_label = 1 if future_return > 0 else 0
     source_events = events[max(0, current_index - 6): current_index + 1]
 
     return FeatureRow(
@@ -85,7 +121,7 @@ def build_feature_row(
         feature_timestamp=current_event.close_time.isoformat(),
         forecast_time=current_event.close_time.isoformat(),
         source_start_time=source_events[0].open_time.isoformat(),
-        target_time=target_event.close_time.isoformat(),
+        target_time=target_time,
         current_price=current_price,
         feature_values={
             "return_1": return_1,
@@ -96,7 +132,7 @@ def build_feature_row(
             "regime_strength_6": regime_strength_6,
         },
         source_event_ids=[event.event_id for event in source_events],
-        target_price=target_event.close_price,
+        target_price=target_price,
         future_return=future_return,
         trend_label=trend_label,
     )

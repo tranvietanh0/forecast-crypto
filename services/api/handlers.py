@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 
+from services.api.presentation import build_forecast_view
 from services.inference.storage import load_batch_detail, load_batch_forecasts, load_forecast_history, load_latest_ready_batch_id
 
 
@@ -31,7 +32,7 @@ def get_latest_forecasts(
         "forecast_batch_id": batch_id,
         "timeframe": timeframe,
         "horizon": horizon,
-        "forecasts": [forecast.to_dict() for forecast in forecasts],
+        "forecasts": [build_forecast_view(forecast) for forecast in forecasts],
     }
 
 
@@ -52,7 +53,7 @@ def get_forecast_history(
         "symbol": symbol,
         "timeframe": timeframe,
         "horizon": horizon,
-        "history": [forecast.to_dict() for forecast in history],
+        "history": [build_forecast_view(forecast) for forecast in history],
     }
 
 
@@ -64,5 +65,5 @@ def get_forecast_batch_detail(connection: sqlite3.Connection, batch_id: str) -> 
     forecasts = load_batch_forecasts(connection, batch_id)
     return {
         **detail,
-        "forecasts": [forecast.to_dict() for forecast in forecasts],
+        "forecasts": [build_forecast_view(forecast) for forecast in forecasts],
     }

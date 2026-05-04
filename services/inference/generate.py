@@ -6,6 +6,7 @@ import sqlite3
 
 from contracts.events import ForecastDirection, ForecastGenerated, SCHEMA_VERSION
 from contracts.timeframe import timeframe_to_timedelta
+from services.ingestion.storage import load_market_events
 from services.inference.selectors import load_latest_model_versions
 from services.inference.storage import (
     BATCH_STATUS_READY,
@@ -16,7 +17,8 @@ from services.inference.storage import (
     load_batch_status,
     mark_batch_ready,
 )
-from services.pipeline.datasets import build_dataset_bundle
+from services.pipeline.datasets import MIN_HISTORY_EVENTS, build_dataset_bundle
+from services.pipeline.features import build_live_feature_row
 from services.pipeline.models import (
     deserialize_price_regressor,
     deserialize_trend_model,
@@ -168,6 +170,80 @@ def _latest_symbol_cutoff(rows, symbol: str) -> datetime:
 
 
 
+def run_live_inference_batch(
+    connection: sqlite3.Connection,
+    symbols: list[str],
+    timeframe: str,
+    horizon: str,
+) -> tuple[str, list[ForecastGenerated]]:
+    selected_models = load_latest_model_versions(connection, timeframe, horizon, symbols)
+    trend_model_version = selected_models["nearest-centroid-classifier"]
+    price_model_version = selected_models["linear-price-regressor"]
+
+    trend_model = _load_trend_model(connection, trend_model_version)
+    price_model = _load_price_model(connection, price_model_version)
+    live_rows = _build_live_rows(connection, symbols, timeframe, horizon)
+    forecast_time = min(datetime.fromisoformat(row.forecast_time) for row in live_rows)
+    batch_key = build_batch_key(
+        trend_model_version,
+        price_model_version,
+        [row.symbol for row in live_rows],
+        timeframe,
+        horizon,
+        forecast_time,
+    )
+    expected_count = len(live_rows)
+
+    with connection:
+        batch_id, inserted = ensure_forecast_batch(
+            connection,
+            batch_key,
+            trend_model_version,
+            timeframe,
+            horizon,
+            [row.symbol for row in live_rows],
+            forecast_time,
+        )
+        if not inserted:
+            existing_status = load_batch_status(connection, batch_id)
+            existing_forecasts = load_batch_forecasts(connection, batch_id)
+            if existing_status == BATCH_STATUS_READY and len(existing_forecasts) == expected_count:
+                return batch_id, existing_forecasts
+
+        forecasts: list[ForecastGenerated] = []
+        horizon_delta = timeframe_to_timedelta(horizon)
+        for row in live_rows:
+            trend_prediction = trend_model.predict(row)
+            price_prediction = price_model.predict(row)
+            target_time = datetime.fromisoformat(row.forecast_time) + horizon_delta
+            forecasts.append(
+                ForecastGenerated(
+                    schema_version=SCHEMA_VERSION,
+                    event_id=ForecastGenerated.new_event_id(),
+                    forecast_batch_id=batch_id,
+                    model_version=trend_model_version,
+                    aux_model_version=price_model_version,
+                    symbol=row.symbol,
+                    timeframe=timeframe,
+                    horizon=horizon,
+                    forecast_time=datetime.fromisoformat(row.forecast_time),
+                    target_time=target_time,
+                    valid_until=target_time,
+                    trend=ForecastDirection.UP if trend_prediction.label == 1 else ForecastDirection.DOWN,
+                    target_price=price_prediction.target_price,
+                    confidence=trend_prediction.confidence,
+                    generated_at=datetime.now(timezone.utc),
+                )
+            )
+        insert_forecast_records(connection, forecasts)
+        if count_batch_forecasts(connection, batch_id) != expected_count:
+            raise InferenceError(f"Forecast batch {batch_id} is incomplete after retry")
+        mark_batch_ready(connection, batch_id)
+        persisted_forecasts = load_batch_forecasts(connection, batch_id)
+    return batch_id, persisted_forecasts
+
+
+
 def _latest_dataset_row_at_or_before(rows, symbol: str, cutoff: datetime):
     symbol_rows = [
         row
@@ -177,3 +253,19 @@ def _latest_dataset_row_at_or_before(rows, symbol: str, cutoff: datetime):
     if not symbol_rows:
         raise InferenceError(f"No dataset rows found for {symbol} at cutoff {cutoff.isoformat()}")
     return symbol_rows[-1]
+
+
+
+def _build_live_rows(
+    connection: sqlite3.Connection,
+    symbols: list[str],
+    timeframe: str,
+    horizon: str,
+):
+    live_rows = []
+    for symbol in symbols:
+        events = load_market_events(connection, symbol, timeframe)
+        if len(events) < MIN_HISTORY_EVENTS:
+            raise InferenceError(f"Not enough market history available for live inference on {symbol}")
+        live_rows.append(build_live_feature_row(events, horizon))
+    return live_rows

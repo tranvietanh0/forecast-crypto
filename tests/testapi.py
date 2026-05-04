@@ -6,8 +6,10 @@ import json
 import tempfile
 import unittest
 
+from contracts.events import MarketEvent, SCHEMA_VERSION
 from services.api.handlers import ApiError, get_forecast_batch_detail, get_forecast_history, get_latest_forecasts
 from services.api.server import ForecastApiHandler
+from services.ingestion.ingest import sync_live_forecasts
 from services.inference.generate import run_inference_batch
 from services.pipeline.train import run_phase_two_training
 import services.pipeline.backtest as backtest_module
@@ -15,6 +17,18 @@ import services.pipeline.datasets as datasets_module
 import services.pipeline.registry as registry_module
 from tests.testpipeline import PipelineTests
 from tools.migrate import apply_all, connect
+
+
+class WindowProvider:
+    def __init__(self, events_by_symbol):
+        self.events_by_symbol = events_by_symbol
+
+    def fetch_candles(self, symbol, timeframe, start_time, end_time):
+        return [
+            event
+            for event in self.events_by_symbol[symbol]
+            if start_time <= event.open_time < end_time
+        ]
 
 
 class ApiTests(PipelineTests):
@@ -108,7 +122,12 @@ class ApiTests(PipelineTests):
                         "2026-05-02T00:10:00+00:00",
                     ),
                 )
-                shared_forecast_time = "2099-05-02T08:00:00+00:00"
+                shared_forecast_time_dt = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0) - timedelta(hours=4)
+                target_time_dt = shared_forecast_time_dt + timedelta(hours=4)
+                valid_until_dt = shared_forecast_time_dt + timedelta(hours=6)
+                shared_forecast_time = shared_forecast_time_dt.isoformat()
+                target_time = target_time_dt.isoformat()
+                valid_until = valid_until_dt.isoformat()
                 connection.execute(
                     "INSERT INTO forecast_batches(forecast_batch_id, model_version, timeframe, horizon, forecast_time, coin_universe_json, batch_status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (
@@ -119,7 +138,7 @@ class ApiTests(PipelineTests):
                         shared_forecast_time,
                         '["BTCUSDT"]',
                         "ready",
-                        "2099-05-02T08:01:00+00:00",
+                        (shared_forecast_time_dt + timedelta(minutes=1)).isoformat(),
                     ),
                 )
                 connection.execute(
@@ -132,7 +151,7 @@ class ApiTests(PipelineTests):
                         shared_forecast_time,
                         '["BTCUSDT"]',
                         "ready",
-                        "2099-05-02T08:02:00+00:00",
+                        (shared_forecast_time_dt + timedelta(minutes=2)).isoformat(),
                     ),
                 )
                 payload = {
@@ -145,12 +164,12 @@ class ApiTests(PipelineTests):
                     "timeframe": "1h",
                     "horizon": "4h",
                     "forecast_time": shared_forecast_time,
-                    "target_time": "2099-05-02T12:00:00+00:00",
-                    "valid_until": "2099-05-02T14:00:00+00:00",
+                    "target_time": target_time,
+                    "valid_until": valid_until,
                     "trend": "up",
                     "target_price": 123.0,
                     "confidence": 0.7,
-                    "generated_at": "2099-05-02T08:02:00+00:00",
+                    "generated_at": (shared_forecast_time_dt + timedelta(minutes=2)).isoformat(),
                 }
                 connection.execute(
                     "INSERT INTO forecasts(forecast_id, forecast_batch_id, model_version, symbol, timeframe, horizon, forecast_time, target_time, trend, target_price, confidence, generated_at, payload_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -162,11 +181,11 @@ class ApiTests(PipelineTests):
                         "1h",
                         "4h",
                         shared_forecast_time,
-                        "2099-05-02T12:00:00+00:00",
+                        target_time,
                         "up",
                         123.0,
                         0.7,
-                        "2099-05-02T08:02:00+00:00",
+                        (shared_forecast_time_dt + timedelta(minutes=2)).isoformat(),
                         json.dumps(payload),
                     ),
                 )
@@ -180,12 +199,12 @@ class ApiTests(PipelineTests):
                         "1h",
                         "4h",
                         shared_forecast_time,
-                        "2099-05-02T12:00:00+00:00",
+                        target_time,
                         "down",
                         120.0,
                         0.6,
-                        "2099-05-02T08:01:00+00:00",
-                        json.dumps({**payload, "forecast_batch_id": "batch:older", "trend": "down", "target_price": 120.0, "confidence": 0.6, "generated_at": "2099-05-02T08:01:00+00:00"}),
+                        (shared_forecast_time_dt + timedelta(minutes=1)).isoformat(),
+                        json.dumps({**payload, "forecast_batch_id": "batch:older", "trend": "down", "target_price": 120.0, "confidence": 0.6, "generated_at": (shared_forecast_time_dt + timedelta(minutes=1)).isoformat()}),
                     ),
                 )
                 latest = get_latest_forecasts(connection, "1h", "4h", ["BTCUSDT"])
@@ -393,6 +412,43 @@ class ApiTests(PipelineTests):
                 with self.assertRaises(ValueError):
                     get_forecast_history(connection, "BTCUSDT", "1h", "4h", 201)
 
+    def _build_recent_market_events(
+        self,
+        symbol: str,
+        base_price: float,
+        current_time: datetime,
+        event_count: int,
+    ):
+        aligned_end_time = current_time.replace(minute=0, second=0, microsecond=0)
+        start_time = aligned_end_time - timedelta(hours=event_count)
+        prices = [base_price + index * 0.45 + ((index % 6) - 2) * 0.3 for index in range(event_count + 1)]
+        events = []
+        for index in range(event_count):
+            open_time = start_time + timedelta(hours=index)
+            open_price = prices[index]
+            close_price = prices[index + 1]
+            high_price = max(open_price, close_price) + 0.8
+            low_price = min(open_price, close_price) - 0.8
+            open_time_ms = int(open_time.timestamp() * 1000)
+            events.append(
+                MarketEvent(
+                    schema_version=SCHEMA_VERSION,
+                    event_id=f"binance:{symbol}:1h:{open_time_ms}",
+                    provider="binance",
+                    symbol=symbol,
+                    timeframe="1h",
+                    open_time=open_time,
+                    close_time=open_time + timedelta(hours=1),
+                    open_price=open_price,
+                    high_price=high_price,
+                    low_price=low_price,
+                    close_price=close_price,
+                    volume=100 + index,
+                    captured_at=open_time + timedelta(hours=1, minutes=1),
+                )
+            )
+        return events
+
     def test_server_returns_generic_500_for_unexpected_error(self) -> None:
         handler_class = type("ConfiguredForecastApiHandler", (ForecastApiHandler,), {"database_url": "sqlite:///./missing.db"})
         handler = handler_class.__new__(handler_class)
@@ -404,3 +460,80 @@ class ApiTests(PipelineTests):
         handler.do_GET()
 
         self.assertEqual(captured, [(500, {"error": "internal server error"})])
+
+    def test_latest_route_auto_syncs_when_watchlist_has_no_ready_batch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            artifacts_dir = Path(temp_dir) / "artifacts"
+            datasets_module.ARTIFACTS_DIR = artifacts_dir
+            registry_module.ARTIFACTS_DIR = artifacts_dir
+            backtest_module.ARTIFACTS_DIR = artifacts_dir
+
+            database_url = f"sqlite:///{Path(temp_dir) / 'latest-auto-sync.db'}"
+            apply_all(database_url, "up")
+            current_time = datetime(2026, 5, 5, 12, 34, tzinfo=timezone.utc)
+
+            with connect(database_url) as connection:
+                provider = WindowProvider({
+                    "BTCUSDT": self._build_recent_market_events("BTCUSDT", 200.0, current_time, 160),
+                    "ETHUSDT": self._build_recent_market_events("ETHUSDT", 150.0, current_time, 160),
+                })
+                route_handler = type("ConfiguredForecastApiHandler", (ForecastApiHandler,), {"database_url": database_url})
+                original_sync_live_forecasts = __import__('services.api.server', fromlist=['sync_live_forecasts']).sync_live_forecasts
+                __import__('services.api.server', fromlist=['sync_live_forecasts']).sync_live_forecasts = lambda connection, database_url, timeframe, horizons, requested_symbols: original_sync_live_forecasts(
+                    connection,
+                    database_url,
+                    timeframe=timeframe,
+                    horizons=horizons,
+                    requested_symbols=requested_symbols,
+                    provider=provider,
+                    current_time=current_time,
+                )
+                try:
+                    payload = route_handler.__new__(route_handler)._route(
+                        "/forecasts/latest",
+                        {"timeframe": ["1h"], "horizon": ["4h"], "watchlist": ["BTCUSDT,ETHUSDT"]},
+                    )
+                finally:
+                    __import__('services.api.server', fromlist=['sync_live_forecasts']).sync_live_forecasts = original_sync_live_forecasts
+
+            self.assertEqual({forecast["symbol"] for forecast in payload["forecasts"]}, {"BTCUSDT", "ETHUSDT"})
+            self.assertTrue(all(forecast["forecast_time"].startswith("2026-") for forecast in payload["forecasts"]))
+
+    def test_live_sync_replaces_future_demo_batch_with_current_runtime_batch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            artifacts_dir = Path(temp_dir) / "artifacts"
+            datasets_module.ARTIFACTS_DIR = artifacts_dir
+            registry_module.ARTIFACTS_DIR = artifacts_dir
+            backtest_module.ARTIFACTS_DIR = artifacts_dir
+
+            database_url = f"sqlite:///{Path(temp_dir) / 'runtime-sync.db'}"
+            apply_all(database_url, "up")
+            current_time = datetime(2026, 5, 5, 12, 34, tzinfo=timezone.utc)
+
+            with connect(database_url) as connection:
+                from services.ingestion.storage import insert_market_events
+                insert_market_events(connection, self._build_market_events("BTCUSDT", 100.0, trending=False))
+                run_phase_two_training(connection, ["BTCUSDT"], "1h", "4h")
+                run_inference_batch(connection, ["BTCUSDT"], "1h", "4h")
+
+                provider = WindowProvider({
+                    "BTCUSDT": self._build_recent_market_events("BTCUSDT", 200.0, current_time, 160),
+                })
+                sync_live_forecasts(
+                    connection,
+                    database_url,
+                    timeframe="1h",
+                    horizons=["4h"],
+                    requested_symbols=["BTCUSDT"],
+                    provider=provider,
+                    current_time=current_time,
+                )
+                latest = get_latest_forecasts(connection, "1h", "4h", ["BTCUSDT"])
+                history = get_forecast_history(connection, "BTCUSDT", "1h", "4h", 5)
+                future_raw_events = connection.execute(
+                    "SELECT COUNT(*) FROM raw_market_events WHERE open_time LIKE '2099-%'"
+                ).fetchone()[0]
+
+            self.assertEqual(future_raw_events, 0)
+            self.assertTrue(latest["forecasts"][0]["forecast_time"].startswith("2026-05-05T12:00:00+00:00"))
+            self.assertTrue(all(item["forecast_time"].startswith("2026-") for item in history["history"]))

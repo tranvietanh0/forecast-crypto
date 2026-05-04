@@ -5,3 +5,7 @@ __pycache__/
 .env
 *.db
 *.sqlite3
+node_modules/
+dist/
+apps/dashboard/node_modules/
+apps/dashboard/dist/
